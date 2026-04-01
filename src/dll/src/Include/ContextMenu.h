@@ -76,6 +76,10 @@ namespace Nilesoft
 		static const uintptr_t CONTEXTMENUSUBCLASS = NILESOFTSHELL;
 		static const uintptr_t CONTEXTMENUSUBCLASS_TASKBAR = NILESOFTSHELL + 1;
 
+		bool IsInternalPerfTraceEnabled();
+		void SetInternalPerfTraceEnabled(bool enabled);
+		void WriteInternalPerfTrace(const wchar_t *iface, const wchar_t *stage, int elapsed, HRESULT hr = S_OK, const wchar_t *detail = L"");
+
 		struct menuitem_t
 		{
 			uint32_t type = 0;

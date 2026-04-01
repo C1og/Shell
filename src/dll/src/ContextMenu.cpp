@@ -171,6 +171,88 @@ namespace Nilesoft
 			return nullptr;
 		}
 
+		inline static bool perf_enabled()
+		{
+			return IsInternalPerfTraceEnabled();
+		}
+
+		inline static void perf_write(const wchar_t *iface, const wchar_t *stage, int elapsed, HRESULT hr = S_OK, const wchar_t *detail = L"")
+		{
+			if(perf_enabled())
+				WriteInternalPerfTrace(iface, stage, elapsed, hr, detail);
+		}
+
+		inline static string perf_menu_path(const ContextMenu::menu_t *menu)
+		{
+			if(!menu)
+				return L"<null>";
+
+			if(!menu->path.empty())
+				return menu->path;
+
+			if(menu->is_main)
+				return L"<main>";
+
+			if(menu->owner && !menu->owner->title.empty())
+				return menu->owner->title.text;
+
+			return L"<root>";
+		}
+
+		inline static string perf_item_label(const menuitem_t *item)
+		{
+			if(!item)
+				return L"<null>";
+
+			if(item->is_separator())
+				return L"<separator>";
+
+			if(!item->title.empty())
+				return item->title;
+
+			if(!item->name.empty())
+				return item->name;
+
+			return L"<untitled>";
+		}
+
+		inline static string perf_tree_path(const menuitem_t *item)
+		{
+			if(!item)
+				return L"<null>";
+
+			if(!item->path.empty())
+				return item->path;
+
+			return perf_item_label(item);
+		}
+
+		struct PerfEvent
+		{
+			const wchar_t *iface = nullptr;
+			const wchar_t *stage = nullptr;
+			bool enabled = false;
+			HRESULT hr = S_OK;
+			Timer timer;
+			string detail;
+
+			PerfEvent(const wchar_t *iface_name, const wchar_t *stage_name)
+				: iface(iface_name), stage(stage_name), enabled(perf_enabled())
+			{
+				if(enabled)
+					timer.start();
+			}
+
+			~PerfEvent()
+			{
+				if(enabled)
+				{
+					timer.stop();
+					perf_write(iface, stage, static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+				}
+			}
+		};
+
 		ContextMenu::ContextMenu(HWND hWnd, HMENU hMenu, Point const &pt)
 		{
 			//d2d.create_render();
@@ -266,6 +348,9 @@ namespace Nilesoft
 										  MenuItemInfo *owner,
 										  menu_t *menu, bool moved)
 		{
+			PerfEvent total_perf(L"PrepareNewItems", L"Total");
+			total_perf.detail.format(L"path=%s count=%d moved=%d", perf_menu_path(menu).c_str(), static_cast<int>(list.size()), moved);
+
 			if(list.empty())
 				return false;
 
@@ -273,6 +358,8 @@ namespace Nilesoft
 			
 			for(auto item : list)
 			{
+				PerfEvent item_perf(L"PrepareNewItems", L"Item");
+				item_perf.detail.format(L"path=%s idx=%d moved=%d props=%d", perf_menu_path(menu).c_str(), _this_index, moved, item ? item->properties : 0);
 				try 
 				{
 					_context._this = nullptr;
@@ -444,6 +531,7 @@ namespace Nilesoft
 
 						_this.title = title;
 						_this.length = title.length<uint32_t>();
+						item_perf.detail.format(L"path=%s idx=%d moved=%d title=%s type=%d", perf_menu_path(menu).c_str(), _this.pos, moved, title.c_str(), _this.type);
 
 						FindPattern find;
 						if(_context.Eval(item->find, value, true) && !value.empty())
@@ -678,13 +766,27 @@ namespace Nilesoft
 				}
 				catch(...) 
 				{
+					item_perf.hr = E_FAIL;
+					item_perf.detail.format(L"path=%s idx=%d moved=%d exception", perf_menu_path(menu).c_str(), _this_index, moved);
 				}
 			}
+			total_perf.detail.format(L"path=%s count=%d moved=%d out=[%d,%d,%d,%d,%d]",
+				perf_menu_path(menu).c_str(),
+				static_cast<int>(list.size()),
+				moved,
+				static_cast<int>(posList.Top.size()),
+				static_cast<int>(posList.Auto.size()),
+				static_cast<int>(posList.Middle.size()),
+				static_cast<int>(posList.Bottom.size()),
+				static_cast<int>(posList.Custom.size()));
 			return true;
 		}
 
 		void ContextMenu::prepare_system_item(menuitem_t *item, MenuItemInfo *mii, menu_t *menu)
 		{
+			PerfEvent total_perf(L"PrepareSystemItem", L"Item");
+			total_perf.detail.format(L"path=%s item=%s native=%d", perf_menu_path(menu).c_str(), perf_item_label(item).c_str(), static_cast<int>(item ? item->native_items.size() : 0));
+
 			auto fix_image_size = [](auto v1, auto v2)->long {
 				double d = double(v1) / v2;
 				return long(d * v2);
@@ -694,6 +796,9 @@ namespace Nilesoft
 
 			auto ev_si = [=](NativeMenu *si, MenuItemInfo *mii, menuitem_t *item)
 			{
+				PerfEvent native_perf(L"PrepareSystemItem", L"NativeRule");
+				native_perf.detail.format(L"path=%s item=%s has_image=%d has_title=%d", perf_menu_path(menu).c_str(), perf_item_label(item).c_str(), si && si->images.normal != nullptr, si && si->title != nullptr);
+
 				if(item->type == 0 && si->checked)
 				{
 					if(auto checked = _context.eval_number<int>(si->checked, 0); checked > 0)
@@ -1011,10 +1116,20 @@ namespace Nilesoft
 					continue;
 				ev_si(si, mii, item);
 			}
+
+			total_perf.detail.format(L"path=%s item=%s native=%d popup=%d image=%d",
+				perf_menu_path(menu).c_str(),
+				perf_item_label(item).c_str(),
+				static_cast<int>(item->native_items.size()),
+				mii->is_popup(),
+				mii->has_image_or_draw());
 		}
 
 		bool ContextMenu::prepare_system_items(PositionList &list, menu_t *menu)
 		{
+			PerfEvent total_perf(L"PrepareSystemItems", L"Total");
+			total_perf.detail.format(L"path=%s count=%d", perf_menu_path(menu).c_str(), (menu && menu->std_items) ? static_cast<int>(menu->std_items->size()) : 0);
+
 			if(!menu || !menu->std_items)
 				return false;
 
@@ -1027,11 +1142,21 @@ namespace Nilesoft
 				list.push(mii);
 			}
 
+			total_perf.detail.format(L"path=%s out=[%d,%d,%d,%d,%d]",
+				perf_menu_path(menu).c_str(),
+				static_cast<int>(list.Top.size()),
+				static_cast<int>(list.Auto.size()),
+				static_cast<int>(list.Middle.size()),
+				static_cast<int>(list.Bottom.size()),
+				static_cast<int>(list.Custom.size()));
 			return true;
 		}
 
 		bool ContextMenu::prepare_system_items2(PositionList &list, menu_t *menu)
 		{
+			PerfEvent total_perf(L"PrepareSystemItems2", L"Total");
+			total_perf.detail.format(L"path=%s movable=%d", perf_menu_path(menu).c_str(), static_cast<int>(__movable_system_items.size()));
+
 			if(!menu)
 				return false;
 
@@ -1045,6 +1170,13 @@ namespace Nilesoft
 				}
 			}
 
+			total_perf.detail.format(L"path=%s out=[%d,%d,%d,%d,%d]",
+				perf_menu_path(menu).c_str(),
+				static_cast<int>(list.Top.size()),
+				static_cast<int>(list.Auto.size()),
+				static_cast<int>(list.Middle.size()),
+				static_cast<int>(list.Bottom.size()),
+				static_cast<int>(list.Custom.size()));
 			return true;
 		}
 
@@ -1052,6 +1184,9 @@ namespace Nilesoft
 		//finalize
 		LRESULT ContextMenu::OnInitMenuPopup(HMENU hMenu, [[maybe_unused]] uint32_t uPosition)
 		{
+			PerfEvent popup_perf(L"ContextMenu", L"OnInitMenuPopup");
+			popup_perf.detail.format(L"hMenu=0x%p pos=%u", hMenu, uPosition);
+
 			__trace(L"ContextMenu.InitMenuPopup begin");
 
 			MENU m = hMenu;
@@ -1062,6 +1197,7 @@ namespace Nilesoft
 			menu->is_main = _hMenu == hMenu;
 			current.hMenu = hMenu;
 			current.menu = menu;
+			popup_perf.detail.format(L"path=%s hMenu=0x%p main=%d", perf_menu_path(menu).c_str(), hMenu, menu->is_main);
 
 			if(menu->is_main)
 			{
@@ -1104,29 +1240,58 @@ namespace Nilesoft
 				owner = menu->owner;
 			}
 			
-			prepare_system_items(_system_items, menu);
+			{
+				PerfEvent perf(L"ContextMenu", L"OnInitMenuPopup.PrepareSystemItems");
+				prepare_system_items(_system_items, menu);
+				perf.detail.format(L"path=%s out=[%d,%d,%d,%d,%d]",
+					perf_menu_path(menu).c_str(),
+					static_cast<int>(_system_items.Top.size()),
+					static_cast<int>(_system_items.Auto.size()),
+					static_cast<int>(_system_items.Middle.size()),
+					static_cast<int>(_system_items.Bottom.size()),
+					static_cast<int>(_system_items.Custom.size()));
+			}
 			
 			std::vector<MenuItemInfo *> bottom_items;
 
 			if(_settings.new_items.enabled)
 			{
-				if(!(owner && owner->is_disabled()))
-				{
-					prepare_new_items(_new_items, menu->dynamics, owner, menu);
+					if(!(owner && owner->is_disabled()))
+					{
+						{
+							PerfEvent perf(L"ContextMenu", L"OnInitMenuPopup.PrepareNewItems");
+							prepare_new_items(_new_items, menu->dynamics, owner, menu);
+							perf.detail.format(L"path=%s dynamics=%d out=[%d,%d,%d,%d,%d]",
+								perf_menu_path(menu).c_str(),
+								static_cast<int>(menu->dynamics.size()),
+								static_cast<int>(_new_items.Top.size()),
+								static_cast<int>(_new_items.Auto.size()),
+								static_cast<int>(_new_items.Middle.size()),
+								static_cast<int>(_new_items.Bottom.size()),
+								static_cast<int>(_new_items.Custom.size()));
+						}
 
-					// add moved dynamic items
-					std::vector<NativeMenu*> mdi;
+						// add moved dynamic items
+						std::vector<NativeMenu*> mdi;
 					for(auto item : _moved_items.dynamics)
 					{
 						if(item->is_parent(parent_level))
 							mdi.push_back(item->owner_dynamic);
 					}
 
-					if(!mdi.empty())
-						prepare_new_items(_new_items, mdi, owner, menu, true);
-				}
+						if(!mdi.empty())
+						{
+							PerfEvent perf(L"ContextMenu", L"OnInitMenuPopup.PrepareMovedNewItems");
+							prepare_new_items(_new_items, mdi, owner, menu, true);
+							perf.detail.format(L"path=%s moved=%d", perf_menu_path(menu).c_str(), static_cast<int>(mdi.size()));
+						}
+					}
 				
-				prepare_system_items2(_new_items, menu);
+					{
+						PerfEvent perf(L"ContextMenu", L"OnInitMenuPopup.PrepareMovedSystemItems");
+						prepare_system_items2(_new_items, menu);
+						perf.detail.format(L"path=%s movable=%d", perf_menu_path(menu).c_str(), static_cast<int>(__movable_system_items.size()));
+					}
 
 				// insert top items
 				if(_new_items.size() > 0)
@@ -1376,6 +1541,9 @@ namespace Nilesoft
 			int i = 0, x = 0;
 			for(auto item : items)
 			{
+				PerfEvent item_perf(L"ContextMenu", L"OnInitMenuPopup.InsertItem");
+				item_perf.detail.format(L"path=%s item=%s pos=%d", perf_menu_path(menu).c_str(), item->is_separator() ? L"<separator>" : item->title.text.c_str(), i);
+
 				item->remove_bitmap();
 				item->add_ownerdraw();
 				item->handle = hMenu;
@@ -1393,6 +1561,7 @@ namespace Nilesoft
 				
 				if(auto res = m.insert(item, i, true, x++); res)
 				{
+					item_perf.hr = S_OK;
 					if(item->is_separator())
 					{
 						menu->popup_height += item->size.cy +
@@ -1482,6 +1651,7 @@ namespace Nilesoft
 				}
 				else if(!item->is_separator())
 				{
+					item_perf.hr = E_FAIL;
 					//_log.warning(L"Not inserted %s", item->title.c_str());
 				}
 			}
@@ -1534,6 +1704,19 @@ namespace Nilesoft
 			}
 
 			__trace(L"ContextMenu.InitMenuPopup end");
+			popup_perf.detail.format(L"path=%s items=%d system=[%d,%d,%d,%d,%d] new=[%d,%d,%d,%d,%d]",
+				perf_menu_path(menu).c_str(),
+				static_cast<int>(items.size()),
+				static_cast<int>(_system_items.Top.size()),
+				static_cast<int>(_system_items.Auto.size()),
+				static_cast<int>(_system_items.Middle.size()),
+				static_cast<int>(_system_items.Bottom.size()),
+				static_cast<int>(_system_items.Custom.size()),
+				static_cast<int>(_new_items.Top.size()),
+				static_cast<int>(_new_items.Auto.size()),
+				static_cast<int>(_new_items.Middle.size()),
+				static_cast<int>(_new_items.Bottom.size()),
+				static_cast<int>(_new_items.Custom.size()));
 
 			return ret;
 		}
@@ -4024,6 +4207,9 @@ namespace Nilesoft
 
 		void ContextMenu::build_main_system_menuitems(menuitem_t *menu, bool is_root)
 		{
+			PerfEvent total_perf(L"BuildMainSystemMenu", L"Total");
+			total_perf.detail.format(L"path=%s count=%d root=%d", perf_tree_path(menu).c_str(), menu ? static_cast<int>(menu->items.size()) : 0, is_root);
+
 			if(!menu || menu->items.empty())
 				return;
 
@@ -4049,6 +4235,15 @@ namespace Nilesoft
 
 			for(auto si : _cache->statics)
 			{
+				PerfEvent rule_total_perf(L"BuildMainSystemMenu", L"RuleTotal");
+				rule_total_perf.detail.format(L"path=%s items=%d has_find=%d has_where=%d has_move=%d has_vis=%d",
+					perf_tree_path(menu).c_str(),
+					static_cast<int>(items->size()),
+					si && si->find != nullptr,
+					si && si->where != nullptr,
+					si && si->moveto != nullptr,
+					si && si->visibility != nullptr);
+
 				if(si->has_clsid)
 					continue;
 
@@ -4057,6 +4252,8 @@ namespace Nilesoft
 
 				for(size_t i = 0; i < items->size(); i++)
 				{
+					PerfEvent match_perf(L"BuildMainSystemMenu", L"RuleMatch");
+					match_perf.detail.format(L"path=%s index=%d item=%s", perf_tree_path(menu).c_str(), static_cast<int>(i), perf_item_label(items->at(i)).c_str());
 					bool removed = false;
 					auto where_defined = false;
 					auto item = items->at(i);
@@ -4190,6 +4387,14 @@ namespace Nilesoft
 						if(!removed)
 							item->native_items.push_back(si);
 
+						match_perf.detail.format(L"path=%s index=%d item=%s removed=%d moved=%d native=%d",
+							perf_tree_path(menu).c_str(),
+							static_cast<int>(i),
+							perf_item_label(item).c_str(),
+							removed,
+							item->path.empty() ? 0 : 1,
+							static_cast<int>(item->native_items.size()));
+
 						if(si->invoke && 0 == _context.parse_invoke(si->invoke))
 						{
 							if(!removed && item->is_menu())
@@ -4205,14 +4410,25 @@ namespace Nilesoft
 					}
 					catch(std::exception const& ex)
 					{
+						match_perf.hr = E_FAIL;
+						match_perf.detail.format(L"path=%s index=%d item=%s ex=%S",
+							perf_tree_path(menu).c_str(),
+							static_cast<int>(i),
+							perf_item_label(item).c_str(),
+							ex.what());
 						_log.error(L"%S", ex.what());
 					}
 				}
 			}
+
+			total_perf.detail.format(L"path=%s count=%d movable=%d", perf_tree_path(menu).c_str(), static_cast<int>(menu->items.size()), static_cast<int>(__movable_system_items.size()));
 		}
 
 		void ContextMenu::build_system_menuitems(HMENU hMenu, menuitem_t *menu, bool is_root)
 		{
+			PerfEvent total_perf(L"BuildSystemMenu", L"Total");
+			total_perf.detail.format(L"path=%s hMenu=0x%p root=%d", perf_tree_path(menu).c_str(), hMenu, is_root);
+
 			::SendMessageW(hwnd.owner, WM_INITMENUPOPUP, reinterpret_cast<WPARAM>(hMenu), 0xFFFFFFFF);
 
 			auto itmes_count = ::GetMenuItemCount(hMenu);
@@ -4221,6 +4437,8 @@ namespace Nilesoft
 
 			for(int i = 0; i < itmes_count; i++)
 			{
+				PerfEvent item_perf(L"BuildSystemMenu", L"Item");
+				item_perf.detail.format(L"path=%s hMenu=0x%p index=%d", perf_tree_path(menu).c_str(), hMenu, i);
 				int found_duplicate = 0;
 				string title;
 				MENUITEMINFOW mii{ sizeof(MENUITEMINFOW) };
@@ -4332,15 +4550,31 @@ namespace Nilesoft
 
 						menu->items.push_back(item.release());
 					}
+
+					item_perf.detail.format(L"path=%s hMenu=0x%p index=%d item=%s type=%d submenu=%d",
+						perf_tree_path(menu).c_str(),
+						hMenu,
+						i,
+						itemPtr ? perf_item_label(itemPtr).c_str() : L"<null>",
+						itemPtr ? itemPtr->type : -1,
+						mii.hSubMenu != nullptr);
 				}
 			}
+
+			total_perf.detail.format(L"path=%s hMenu=0x%p root=%d items=%d", perf_tree_path(menu).c_str(), hMenu, is_root, static_cast<int>(menu ? menu->items.size() : 0));
 		}
 
 		bool ContextMenu::Initialize()
 		{
+			PerfEvent init_perf(L"ContextMenu", L"Initialize");
 			try
 			{
-				if(!Initializer::Inited()) return false;
+				if(!Initializer::Inited())
+				{
+					init_perf.hr = E_FAIL;
+					init_perf.detail = L"Initializer::Inited=false";
+					return false;
+				}
 
 				__trace(L"ContextMenu init");
 
@@ -4353,10 +4587,18 @@ namespace Nilesoft
 				Selected.Window.handle = hwnd.owner;
 				Selected.Window.hInstance = _window.instance();
 
-				if(!Selected.QueryShellWindow())
 				{
-					__trace(L"QueryShellWindow");
-					return false;
+					PerfEvent perf(L"ContextMenu", L"QueryShellWindow");
+					const auto ok = Selected.QueryShellWindow();
+					perf.hr = ok ? S_OK : E_FAIL;
+					perf.detail.format(L"hwnd=0x%p", hwnd.owner);
+					if(!ok)
+					{
+						init_perf.hr = E_FAIL;
+						init_perf.detail = L"QueryShellWindow=false";
+						__trace(L"QueryShellWindow");
+						return false;
+					}
 				}
 
 				//if(is_excluded())
@@ -4378,10 +4620,18 @@ namespace Nilesoft
 					}
 				}
 
-				if(!initializer->query())
 				{
-					__trace(L"initializer query");
-					return false;
+					PerfEvent perf(L"ContextMenu", L"InitializerQuery");
+					const auto ok = initializer->query();
+					perf.hr = ok ? S_OK : E_FAIL;
+					perf.detail = L"Initializer::instance->query";
+					if(!ok)
+					{
+						init_perf.hr = E_FAIL;
+						init_perf.detail = L"initializer->query=false";
+						__trace(L"initializer query");
+						return false;
+					}
 				}
 
 				_context.Cache = initializer->cache;
@@ -4398,44 +4648,85 @@ namespace Nilesoft
 						Selected.Directory = Path::GetKnownFolder(FOLDERID_Desktop).move();
 						break;
 					default:
+					{
+						PerfEvent perf(L"ContextMenu", L"QuerySelected");
 						if(!Selected.QuerySelected())
 						{
+							perf.hr = E_FAIL;
+							perf.detail = L"continue_on_failure";
 							__trace(L"QuerySelected");
 							//return false;
+						}
+						else
+						{
+							perf.detail.format(L"count=%d", Selected.Count());
 						}
 						//::{2cc5ca98-6485-489a-920e-b3e88a6ccce3}
 						//return false;
 						break;
+					}
 				}
 
 				if(Selected.Directory.empty())
 					Selected.Directory = Path::CurrentDirectory().move();
 
-				_vis = _context.parse_visibility(_cache->dynamic.visibility);
+				{
+					PerfEvent perf(L"ContextMenu", L"ParseDynamicVisibility");
+					_vis = _context.parse_visibility(_cache->dynamic.visibility);
+					perf.detail.format(L"visibility=%d", static_cast<int>(_vis));
+				}
 
 				if(_vis == Visibility::Hidden)
-					return false;
-
-				if(!Selected.Preparing())
 				{
-					__trace(L"Selected.Preparing");
+					init_perf.hr = E_FAIL;
+					init_perf.detail = L"dynamic.visibility=Hidden";
 					return false;
 				}
 
+				{
+					PerfEvent perf(L"ContextMenu", L"SelectedPreparing");
+					const auto ok = Selected.Preparing();
+					perf.hr = ok ? S_OK : E_FAIL;
+					perf.detail.format(L"count=%d dir=%s", Selected.Count(), Selected.Directory.c_str());
+					if(!ok)
+					{
+						init_perf.hr = E_FAIL;
+						init_perf.detail = L"Selected.Preparing=false";
+						__trace(L"Selected.Preparing");
+						return false;
+					}
+				}
+
 				if(is_excluded())
+				{
+					init_perf.hr = E_FAIL;
+					init_perf.detail = L"is_excluded=true";
 					return false;
+				}
 
 				hInstance = _window.instance();
 
 				composition.activated = ::IsCompositionActive();
 				::DwmIsCompositionEnabled(reinterpret_cast<BOOL *>(&composition.DwmEnabled));
 				
-				init_cfg();
-				
-				if(!_windowSubclass.hook(hwnd.owner, WindowSubclassProc, CONTEXTMENUSUBCLASS, this))
 				{
-					__trace(L"WindowSubclass");
-					return false;
+					PerfEvent perf(L"ContextMenu", L"InitCfg");
+					init_cfg();
+					perf.detail.format(L"theme=%d modify=%d new=%d", static_cast<int>(_theme.Type), _settings.modify_items.enabled, _settings.new_items.enabled);
+				}
+				
+				{
+					PerfEvent perf(L"ContextMenu", L"WindowSubclass");
+					const auto ok = _windowSubclass.hook(hwnd.owner, WindowSubclassProc, CONTEXTMENUSUBCLASS, this);
+					perf.hr = ok ? S_OK : E_FAIL;
+					perf.detail.format(L"hwnd=0x%p", hwnd.owner);
+					if(!ok)
+					{
+						init_perf.hr = E_FAIL;
+						init_perf.detail = L"WindowSubclass=false";
+						__trace(L"WindowSubclass");
+						return false;
+					}
 				}
 			
 				Prop::Set(hwnd.owner, this);
@@ -4468,15 +4759,26 @@ namespace Nilesoft
 				__map_system_menu[0] = __system_menu_tree;
 
 				if(0 == ::GetPropW(hwnd.owner, UxSubclass))
+				{
+					PerfEvent perf(L"ContextMenu", L"BuildSystemTree");
 					build_system_menuitems(_hMenu_original, __system_menu_tree, true);
+					perf.detail.format(L"items=%d", static_cast<int>(__system_menu_tree->items.size()));
+				}
 
 				if(_settings.modify_items.enabled)
+				{
+					PerfEvent perf(L"ContextMenu", L"ApplyStaticRules");
 					build_main_system_menuitems(__system_menu_tree, true);
+					perf.detail.format(L"items=%d movable=%d", static_cast<int>(__system_menu_tree->items.size()), static_cast<int>(__movable_system_items.size()));
+				}
 
+				init_perf.detail.format(L"ok items=%d movable=%d", static_cast<int>(__system_menu_tree->items.size()), static_cast<int>(__movable_system_items.size()));
 				return true;
 			}
 			catch(...)
 			{
+				init_perf.hr = E_FAIL;
+				init_perf.detail = L"exception";
 #ifdef _DEBUG
 				Logger::Exception(__func__);
 #endif

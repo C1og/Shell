@@ -186,6 +186,8 @@ namespace
 		bool is_uwp = false;
 	};
 
+	thread_local bool g_internal_perf_trace_enabled = false;
+
 	const wchar_t *PerfTraceTag(const PerfTraceInfo &trace)
 	{
 		return trace.is_uwp ? L"UWP" : L"";
@@ -218,6 +220,22 @@ namespace
 				   static_cast<uint32_t>(hr),
 				   detail ? detail : L"");
 	}
+
+	struct InternalPerfTraceGuard
+	{
+		bool previous = false;
+
+		explicit InternalPerfTraceGuard(bool enabled)
+		{
+			previous = g_internal_perf_trace_enabled;
+			g_internal_perf_trace_enabled = enabled;
+		}
+
+		~InternalPerfTraceGuard()
+		{
+			g_internal_perf_trace_enabled = previous;
+		}
+	};
 
 	HRESULT WrapPerfInterface(REFIID riid, LPVOID *ppv, const PerfTraceInfo &trace);
 
@@ -676,6 +694,8 @@ namespace
 		if(!debug_perf)
 			return ContextMenu::CreateAndInitialize(hWnd, hMenu, pt, explorer, contextmenuhandler);
 
+		InternalPerfTraceGuard internal_perf_guard(true);
+
 		Timer create_timer;
 		create_timer.start();
 		auto ctx = ContextMenu::CreateAndInitialize(hWnd, hMenu, pt, explorer, contextmenuhandler);
@@ -691,6 +711,26 @@ namespace
 					   ctx ? L"ok" : L"null");
 		return ctx;
 	}
+}
+
+bool Nilesoft::Shell::IsInternalPerfTraceEnabled()
+{
+	return g_internal_perf_trace_enabled;
+}
+
+void Nilesoft::Shell::SetInternalPerfTraceEnabled(bool enabled)
+{
+	g_internal_perf_trace_enabled = enabled;
+}
+
+void Nilesoft::Shell::WriteInternalPerfTrace(const wchar_t *iface, const wchar_t *stage, int elapsed, HRESULT hr, const wchar_t *detail)
+{
+	if(!g_internal_perf_trace_enabled)
+		return;
+
+	PerfTraceInfo trace;
+	trace.clsid = L"Nilesoft.Shell";
+	WritePerfTrace(trace, iface, stage, elapsed, hr, detail);
 }
 
 LRESULT __stdcall TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
