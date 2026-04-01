@@ -5,6 +5,7 @@
 
 using namespace Nilesoft::Diagnostics;
 #include <mutex>
+#include <unordered_set>
 
 extern Logger &_log;
 
@@ -250,6 +251,34 @@ namespace Nilesoft
 					timer.stop();
 					perf_write(iface, stage, static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
 				}
+			}
+		};
+
+		thread_local std::unordered_set<menuitem_t *> *g_build_main_system_menuitems_visited = nullptr;
+
+		struct BuildMainSystemMenuVisitGuard
+		{
+			bool root = false;
+			std::unordered_set<menuitem_t *> visited;
+
+			BuildMainSystemMenuVisitGuard()
+			{
+				if(!g_build_main_system_menuitems_visited)
+				{
+					g_build_main_system_menuitems_visited = &visited;
+					root = true;
+				}
+			}
+
+			~BuildMainSystemMenuVisitGuard()
+			{
+				if(root)
+					g_build_main_system_menuitems_visited = nullptr;
+			}
+
+			std::unordered_set<menuitem_t *> &get() const
+			{
+				return *g_build_main_system_menuitems_visited;
 			}
 		};
 
@@ -4213,6 +4242,14 @@ namespace Nilesoft
 			if(!menu || menu->items.empty())
 				return;
 
+			BuildMainSystemMenuVisitGuard visit_guard;
+			auto &visited = visit_guard.get();
+			if(!visited.insert(menu).second)
+			{
+				total_perf.detail.format(L"path=%s count=%d root=%d skipped=visited", perf_tree_path(menu).c_str(), static_cast<int>(menu->items.size()), is_root);
+				return;
+			}
+
 			auto is_location = [=](string &location, string const &path)->auto
 			{
 				location.trim().trim(L'/');
@@ -4397,16 +4434,13 @@ namespace Nilesoft
 
 						if(si->invoke && 0 == _context.parse_invoke(si->invoke))
 						{
-							if(!removed && item->is_menu())
-								build_main_system_menuitems(item);
 							break;
 						}
 
 						continue;
 
 					skip:
-						if(item->is_menu())
-							build_main_system_menuitems(item);
+						;
 					}
 					catch(std::exception const& ex)
 					{
@@ -4420,6 +4454,17 @@ namespace Nilesoft
 					}
 				}
 			}
+
+			std::vector<menuitem_t *> submenus;
+			submenus.reserve(items->size());
+			for(auto item : *items)
+			{
+				if(item->is_menu())
+					submenus.push_back(item);
+			}
+
+			for(auto item : submenus)
+				build_main_system_menuitems(item, false);
 
 			total_perf.detail.format(L"path=%s count=%d movable=%d", perf_tree_path(menu).c_str(), static_cast<int>(menu->items.size()), static_cast<int>(__movable_system_items.size()));
 		}
