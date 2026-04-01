@@ -3,6 +3,7 @@
 #include "Library/detours.h"
 #include "RegistryConfig.h"
 #include <UIAutomation.h>
+#include <new>
 using namespace Nilesoft::Shell;
 using namespace Diagnostics;
 
@@ -176,6 +177,521 @@ Detours<decltype(::CoCreateInstance)> _CoCreateInstance;
 
 uint32_t MN_CONTEXTMENU = 0;
 std::unordered_map<HWND, Window> _window_taskbar;
+
+namespace
+{
+	struct PerfTraceInfo
+	{
+		string clsid;
+		bool is_uwp = false;
+	};
+
+	const wchar_t *PerfTraceTag(const PerfTraceInfo &trace)
+	{
+		return trace.is_uwp ? L"UWP" : L"";
+	}
+
+	const wchar_t *PerfInterfaceName(REFIID riid)
+	{
+		if(riid == IID_IContextMenu)
+			return L"IContextMenu";
+		if(riid == IID_IContextMenu2)
+			return L"IContextMenu2";
+		if(riid == IID_IContextMenu3)
+			return L"IContextMenu3";
+		if(riid == IID_IExplorerCommand)
+			return L"IExplorerCommand";
+		if(riid == IID_IExplorerCommandState)
+			return L"IExplorerCommandState";
+		return L"IUnknown";
+	}
+
+	void WritePerfTrace(const PerfTraceInfo &trace, const wchar_t *iface, const wchar_t *stage, int elapsed, HRESULT hr = S_OK, const wchar_t *detail = L"")
+	{
+		_log.write(L"%d%s\t%s\t%s\t%s\t%s\t0x%08X\t%s\r\n",
+				   elapsed,
+				   elapsed > 0 ? L"ms" : L"",
+				   trace.clsid.c_str(),
+				   iface ? iface : L"",
+				   stage ? stage : L"",
+				   PerfTraceTag(trace),
+				   static_cast<uint32_t>(hr),
+				   detail ? detail : L"");
+	}
+
+	HRESULT WrapPerfInterface(REFIID riid, LPVOID *ppv, const PerfTraceInfo &trace);
+
+	class EnumExplorerCommandLogger final : public IEnumExplorerCommand
+	{
+		LONG m_refs = 1;
+		IEnumExplorerCommand *m_inner = nullptr;
+		PerfTraceInfo m_trace;
+
+	public:
+		EnumExplorerCommandLogger(IEnumExplorerCommand *inner, const PerfTraceInfo &trace)
+			: m_inner(inner), m_trace(trace)
+		{
+		}
+
+		~EnumExplorerCommandLogger()
+		{
+			if(m_inner)
+				m_inner->Release();
+		}
+
+		HRESULT __stdcall QueryInterface(REFIID riid, void **ppv) override
+		{
+			if(!ppv)
+				return E_POINTER;
+
+			*ppv = nullptr;
+			if(riid == IID_IUnknown || riid == IID_IEnumExplorerCommand)
+			{
+				*ppv = static_cast<IEnumExplorerCommand *>(this);
+				AddRef();
+				return S_OK;
+			}
+
+			return m_inner ? m_inner->QueryInterface(riid, ppv) : E_NOINTERFACE;
+		}
+
+		ULONG __stdcall AddRef() override
+		{
+			return static_cast<ULONG>(::InterlockedIncrement(&m_refs));
+		}
+
+		ULONG __stdcall Release() override
+		{
+			auto refs = static_cast<ULONG>(::InterlockedDecrement(&m_refs));
+			if(refs == 0)
+				delete this;
+			return refs;
+		}
+
+		HRESULT __stdcall Next(ULONG celt, IExplorerCommand **apUICommand, ULONG *pceltFetched) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->Next(celt, apUICommand, pceltFetched);
+			timer.stop();
+
+			ULONG fetched = 0;
+			if(pceltFetched)
+				fetched = *pceltFetched;
+			else if(hr == S_OK)
+				fetched = celt;
+
+			if((hr == S_OK || hr == S_FALSE) && apUICommand)
+			{
+				for(ULONG i = 0; i < fetched; ++i)
+				{
+					if(apUICommand[i])
+						WrapPerfInterface(IID_IExplorerCommand, reinterpret_cast<LPVOID *>(&apUICommand[i]), m_trace);
+				}
+			}
+
+			string detail;
+			detail.append_format(L"requested=%u fetched=%u", static_cast<uint32_t>(celt), static_cast<uint32_t>(fetched));
+			WritePerfTrace(m_trace, L"IEnumExplorerCommand", L"Next", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+
+		HRESULT __stdcall Skip(ULONG celt) override
+		{
+			return m_inner->Skip(celt);
+		}
+
+		HRESULT __stdcall Reset() override
+		{
+			return m_inner->Reset();
+		}
+
+		HRESULT __stdcall Clone(IEnumExplorerCommand **ppenum) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->Clone(ppenum);
+			timer.stop();
+
+			if(SUCCEEDED(hr) && ppenum && *ppenum)
+			{
+				auto inner = *ppenum;
+				if(auto wrapper = new(std::nothrow) EnumExplorerCommandLogger(inner, m_trace))
+					*ppenum = wrapper;
+			}
+
+			WritePerfTrace(m_trace, L"IEnumExplorerCommand", L"Clone", static_cast<int>(timer.elapsed_milliseconds()), hr);
+			return hr;
+		}
+	};
+
+	class ExplorerCommandLogger final : public IExplorerCommand
+	{
+		LONG m_refs = 1;
+		IExplorerCommand *m_inner = nullptr;
+		PerfTraceInfo m_trace;
+
+	public:
+		ExplorerCommandLogger(IExplorerCommand *inner, const PerfTraceInfo &trace)
+			: m_inner(inner), m_trace(trace)
+		{
+		}
+
+		~ExplorerCommandLogger()
+		{
+			if(m_inner)
+				m_inner->Release();
+		}
+
+		HRESULT __stdcall QueryInterface(REFIID riid, void **ppv) override
+		{
+			if(!ppv)
+				return E_POINTER;
+
+			*ppv = nullptr;
+			if(riid == IID_IUnknown || riid == IID_IExplorerCommand)
+			{
+				*ppv = static_cast<IExplorerCommand *>(this);
+				AddRef();
+				return S_OK;
+			}
+
+			return m_inner ? m_inner->QueryInterface(riid, ppv) : E_NOINTERFACE;
+		}
+
+		ULONG __stdcall AddRef() override
+		{
+			return static_cast<ULONG>(::InterlockedIncrement(&m_refs));
+		}
+
+		ULONG __stdcall Release() override
+		{
+			auto refs = static_cast<ULONG>(::InterlockedDecrement(&m_refs));
+			if(refs == 0)
+				delete this;
+			return refs;
+		}
+
+		HRESULT __stdcall GetTitle(IShellItemArray *psiItemArray, LPWSTR *ppszName) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->GetTitle(psiItemArray, ppszName);
+			timer.stop();
+
+			string detail;
+			if(SUCCEEDED(hr) && ppszName && *ppszName)
+				detail.append_format(L"title=%s", *ppszName);
+			WritePerfTrace(m_trace, L"IExplorerCommand", L"GetTitle", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+
+		HRESULT __stdcall GetIcon(IShellItemArray *psiItemArray, LPWSTR *ppszIcon) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->GetIcon(psiItemArray, ppszIcon);
+			timer.stop();
+
+			string detail;
+			if(SUCCEEDED(hr) && ppszIcon && *ppszIcon)
+				detail.append_format(L"icon=%s", *ppszIcon);
+			WritePerfTrace(m_trace, L"IExplorerCommand", L"GetIcon", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+
+		HRESULT __stdcall GetToolTip(IShellItemArray *psiItemArray, LPWSTR *ppszInfotip) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->GetToolTip(psiItemArray, ppszInfotip);
+			timer.stop();
+
+			string detail;
+			if(SUCCEEDED(hr) && ppszInfotip && *ppszInfotip)
+				detail.append_format(L"tip=%s", *ppszInfotip);
+			WritePerfTrace(m_trace, L"IExplorerCommand", L"GetToolTip", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+
+		HRESULT __stdcall GetCanonicalName(GUID *pguidCommandName) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->GetCanonicalName(pguidCommandName);
+			timer.stop();
+
+			string detail;
+			if(SUCCEEDED(hr) && pguidCommandName)
+				detail = Guid(*pguidCommandName).to_string(2);
+			WritePerfTrace(m_trace, L"IExplorerCommand", L"GetCanonicalName", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+
+		HRESULT __stdcall GetFlags(EXPCMDFLAGS *pFlags) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->GetFlags(pFlags);
+			timer.stop();
+
+			string detail;
+			detail.append_format(L"flags=0x%X", pFlags ? static_cast<uint32_t>(*pFlags) : 0);
+			WritePerfTrace(m_trace, L"IExplorerCommand", L"GetFlags", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+
+		HRESULT __stdcall GetState(IShellItemArray *psiItemArray, BOOL fOkToBeSlow, EXPCMDSTATE *pCmdState) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->GetState(psiItemArray, fOkToBeSlow, pCmdState);
+			timer.stop();
+
+			string detail;
+			detail.append_format(L"slow=%d state=0x%X", fOkToBeSlow ? 1 : 0, pCmdState ? static_cast<uint32_t>(*pCmdState) : 0);
+			WritePerfTrace(m_trace, L"IExplorerCommand", L"GetState", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+
+		HRESULT __stdcall Invoke(IShellItemArray *psiItemArray, IBindCtx *pbc) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->Invoke(psiItemArray, pbc);
+			timer.stop();
+			WritePerfTrace(m_trace, L"IExplorerCommand", L"Invoke", static_cast<int>(timer.elapsed_milliseconds()), hr);
+			return hr;
+		}
+
+		HRESULT __stdcall EnumSubCommands(IEnumExplorerCommand **ppEnum) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_inner->EnumSubCommands(ppEnum);
+			timer.stop();
+
+			if(SUCCEEDED(hr) && ppEnum && *ppEnum)
+			{
+				auto inner = *ppEnum;
+				if(auto wrapper = new(std::nothrow) EnumExplorerCommandLogger(inner, m_trace))
+					*ppEnum = wrapper;
+			}
+
+			string detail;
+			detail.append_format(L"has_enum=%d", (ppEnum && *ppEnum) ? 1 : 0);
+			WritePerfTrace(m_trace, L"IExplorerCommand", L"EnumSubCommands", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+	};
+
+	class ContextMenuLogger final : public IContextMenu3
+	{
+		LONG m_refs = 1;
+		IContextMenu *m_contextMenu = nullptr;
+		IContextMenu2 *m_contextMenu2 = nullptr;
+		IContextMenu3 *m_contextMenu3 = nullptr;
+		PerfTraceInfo m_trace;
+
+		explicit ContextMenuLogger(const PerfTraceInfo &trace)
+			: m_trace(trace)
+		{
+		}
+
+		static IUnknown *AsUnknown(REFIID riid, LPVOID pv)
+		{
+			if(riid == IID_IContextMenu)
+				return static_cast<IContextMenu *>(pv);
+			if(riid == IID_IContextMenu2)
+				return static_cast<IContextMenu2 *>(pv);
+			if(riid == IID_IContextMenu3)
+				return static_cast<IContextMenu3 *>(pv);
+			return nullptr;
+		}
+
+	public:
+		static HRESULT Create(REFIID riid, LPVOID *ppv, const PerfTraceInfo &trace)
+		{
+			if(!ppv || !*ppv)
+				return E_POINTER;
+
+			auto wrapper = new(std::nothrow) ContextMenuLogger(trace);
+			if(!wrapper)
+				return E_OUTOFMEMORY;
+
+			if(riid == IID_IContextMenu)
+				wrapper->m_contextMenu = static_cast<IContextMenu *>(*ppv);
+			else if(riid == IID_IContextMenu2)
+				wrapper->m_contextMenu2 = static_cast<IContextMenu2 *>(*ppv);
+			else if(riid == IID_IContextMenu3)
+				wrapper->m_contextMenu3 = static_cast<IContextMenu3 *>(*ppv);
+			else
+			{
+				delete wrapper;
+				return E_NOINTERFACE;
+			}
+
+			auto unknown = AsUnknown(riid, *ppv);
+			if(!unknown)
+			{
+				delete wrapper;
+				return E_NOINTERFACE;
+			}
+
+			if(!wrapper->m_contextMenu && FAILED(unknown->QueryInterface(IID_IContextMenu, reinterpret_cast<void **>(&wrapper->m_contextMenu))))
+			{
+				delete wrapper;
+				return E_NOINTERFACE;
+			}
+
+			if(!wrapper->m_contextMenu2)
+				unknown->QueryInterface(IID_IContextMenu2, reinterpret_cast<void **>(&wrapper->m_contextMenu2));
+			if(!wrapper->m_contextMenu3)
+				unknown->QueryInterface(IID_IContextMenu3, reinterpret_cast<void **>(&wrapper->m_contextMenu3));
+
+			*ppv = (riid == IID_IContextMenu3 && wrapper->m_contextMenu3)
+				? static_cast<IContextMenu3 *>(wrapper)
+				: (riid == IID_IContextMenu2 && wrapper->m_contextMenu2)
+					? static_cast<IContextMenu2 *>(wrapper)
+					: static_cast<IContextMenu *>(wrapper);
+			return S_OK;
+		}
+
+		~ContextMenuLogger()
+		{
+			if(m_contextMenu)
+				m_contextMenu->Release();
+			if(m_contextMenu2)
+				m_contextMenu2->Release();
+			if(m_contextMenu3)
+				m_contextMenu3->Release();
+		}
+
+		HRESULT __stdcall QueryInterface(REFIID riid, void **ppv) override
+		{
+			if(!ppv)
+				return E_POINTER;
+
+			*ppv = nullptr;
+			if(riid == IID_IUnknown || riid == IID_IContextMenu)
+			{
+				*ppv = static_cast<IContextMenu *>(this);
+			}
+			else if(riid == IID_IContextMenu2 && m_contextMenu2)
+			{
+				*ppv = static_cast<IContextMenu2 *>(this);
+			}
+			else if(riid == IID_IContextMenu3 && m_contextMenu3)
+			{
+				*ppv = static_cast<IContextMenu3 *>(this);
+			}
+
+			if(*ppv)
+			{
+				AddRef();
+				return S_OK;
+			}
+
+			return m_contextMenu ? m_contextMenu->QueryInterface(riid, ppv) : E_NOINTERFACE;
+		}
+
+		ULONG __stdcall AddRef() override
+		{
+			return static_cast<ULONG>(::InterlockedIncrement(&m_refs));
+		}
+
+		ULONG __stdcall Release() override
+		{
+			auto refs = static_cast<ULONG>(::InterlockedDecrement(&m_refs));
+			if(refs == 0)
+				delete this;
+			return refs;
+		}
+
+		HRESULT __stdcall QueryContextMenu(HMENU hMenu, UINT indexMenu, UINT idCmdFirst, UINT idCmdLast, UINT uFlags) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_contextMenu->QueryContextMenu(hMenu, indexMenu, idCmdFirst, idCmdLast, uFlags);
+			timer.stop();
+
+			string detail;
+			detail.append_format(L"flags=0x%X index=%u range=%u-%u", uFlags, indexMenu, idCmdFirst, idCmdLast);
+			WritePerfTrace(m_trace, L"IContextMenu", L"QueryContextMenu", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+
+		HRESULT __stdcall InvokeCommand(LPCMINVOKECOMMANDINFO pici) override
+		{
+			Timer timer;
+			timer.start();
+			auto hr = m_contextMenu->InvokeCommand(pici);
+			timer.stop();
+
+			string detail;
+			detail.append_format(L"mask=0x%X", pici ? static_cast<uint32_t>(pici->fMask) : 0);
+			WritePerfTrace(m_trace, L"IContextMenu", L"InvokeCommand", static_cast<int>(timer.elapsed_milliseconds()), hr, detail.c_str());
+			return hr;
+		}
+
+		HRESULT __stdcall GetCommandString(UINT_PTR idCmd, UINT uType, UINT *pwReserved, LPSTR pszName, UINT cchMax) override
+		{
+			return m_contextMenu->GetCommandString(idCmd, uType, pwReserved, pszName, cchMax);
+		}
+
+		HRESULT __stdcall HandleMenuMsg(UINT uMsg, WPARAM wParam, LPARAM lParam) override
+		{
+			return m_contextMenu2 ? m_contextMenu2->HandleMenuMsg(uMsg, wParam, lParam) : E_NOTIMPL;
+		}
+
+		HRESULT __stdcall HandleMenuMsg2(UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT *plResult) override
+		{
+			return m_contextMenu3 ? m_contextMenu3->HandleMenuMsg2(uMsg, wParam, lParam, plResult) : E_NOTIMPL;
+		}
+	};
+
+	HRESULT WrapPerfInterface(REFIID riid, LPVOID *ppv, const PerfTraceInfo &trace)
+	{
+		if(!ppv || !*ppv)
+			return E_POINTER;
+
+		if(riid == IID_IExplorerCommand)
+		{
+			if(auto wrapper = new(std::nothrow) ExplorerCommandLogger(static_cast<IExplorerCommand *>(*ppv), trace))
+			{
+				*ppv = static_cast<IExplorerCommand *>(wrapper);
+				return S_OK;
+			}
+			return E_OUTOFMEMORY;
+		}
+
+		if(riid == IID_IContextMenu || riid == IID_IContextMenu2 || riid == IID_IContextMenu3)
+			return ContextMenuLogger::Create(riid, ppv, trace);
+
+		return E_NOINTERFACE;
+	}
+
+	ContextMenu *CreateTrackedContextMenu(HWND hWnd, HMENU hMenu, Point const &pt, bool explorer, bool contextmenuhandler, bool debug_perf)
+	{
+		if(!debug_perf)
+			return ContextMenu::CreateAndInitialize(hWnd, hMenu, pt, explorer, contextmenuhandler);
+
+		Timer create_timer;
+		create_timer.start();
+		auto ctx = ContextMenu::CreateAndInitialize(hWnd, hMenu, pt, explorer, contextmenuhandler);
+		create_timer.stop();
+
+		PerfTraceInfo trace;
+		trace.clsid = L"Nilesoft.Shell";
+		WritePerfTrace(trace,
+					   L"ContextMenu",
+					   L"CreateAndInitialize",
+					   static_cast<int>(create_timer.elapsed_milliseconds()),
+					   ctx ? S_OK : E_FAIL,
+					   ctx ? L"ok" : L"null");
+		return ctx;
+	}
+}
 
 LRESULT __stdcall TaskbarSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 LRESULT __stdcall TaskbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -459,6 +975,7 @@ HRESULT __stdcall CoCreateInstanceHook(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWO
 				this_item _this; context._this = &_this;
 				_this.is_uwp = is_UWP;
 				_this.clsid = Guid(rclsid).to_string(2);
+				PerfTraceInfo trace{ _this.clsid, is_UWP };
 
 				bool test = Keyboard::IsKeyDown(VK_MENU);
 				if(test)
@@ -467,8 +984,12 @@ HRESULT __stdcall CoCreateInstanceHook(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWO
 					t.start();
 					hr = _CoCreateInstance.invoke(rclsid, pUnkOuter, dwClsContext, riid, ppv);
 					t.stop();
-					auto elapsed = (int)t.elapsed_milliseconds();
-					_log.write(L"%d%s\t%s\t%s\r\n", elapsed, elapsed > 0 ? L"ms" : L"" , _this.clsid.c_str(), is_UWP ? L"UWP":L"");
+					auto elapsed = static_cast<int>(t.elapsed_milliseconds());
+					string detail;
+					detail.append_format(L"ctx=0x%X", dwClsContext);
+					WritePerfTrace(trace, PerfInterfaceName(riid), L"CoCreateInstance", elapsed, hr, detail.c_str());
+					if(SUCCEEDED(hr) && ppv && *ppv)
+						WrapPerfInterface(riid, ppv, trace);
 					return hr;
 				}
 
@@ -545,6 +1066,7 @@ BOOL WINAPI NtUserTrackPopupMenu(HMENU hMenu, uint32_t uFlags, int x, int y, HWN
 	{
 		__try
 		{
+			const auto debug_perf = Keyboard::IsKeyDown(VK_MENU);
 
 			if(!is_registered())
 			{
@@ -565,7 +1087,8 @@ BOOL WINAPI NtUserTrackPopupMenu(HMENU hMenu, uint32_t uFlags, int x, int y, HWN
 					_initializer.init();
 				}
 
-				auto ctx = ContextMenu::CreateAndInitialize(hWnd, hMenu, { x, y }, _loader.explorer, _loader.contextmenuhandler);
+				auto ctx = CreateTrackedContextMenu(hWnd, hMenu, { x, y }, _loader.explorer, _loader.contextmenuhandler, debug_perf);
+
 				if(ctx != nullptr)
 				{
 

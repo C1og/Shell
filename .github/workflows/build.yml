@@ -5,6 +5,7 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,7 +24,7 @@ jobs:
       SOLUTION_FILE_PATH: src/Shell.sln
       BUILD_CONFIGURATION: ${{matrix.configuration}}
       BUILD_PLATFORM: ${{matrix.platform}}
-      BIN_PATH: D:\a\Shell\Shell\src\bin
+      BIN_PATH: ${{ github.workspace }}\src\bin
     runs-on: windows-latest
 
     steps:
@@ -43,15 +44,15 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: shell-${{matrix.platform}}
+        name: shell-${{matrix.platform}}-${{matrix.configuration}}
         path: |
           ${{env.BIN_PATH}}\*
           !${{env.BIN_PATH}}\*.lib
           !${{env.BIN_PATH}}\*.exp
           !${{env.BIN_PATH}}\*.wixpdb
           !${{env.BIN_PATH}}\ca.dll
-        if-no-files-found: warn
-        retention-days: 0
+        if-no-files-found: error
+        retention-days: 7
         compression-level: 6
         overwrite: false
         include-hidden-files: false
