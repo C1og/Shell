@@ -274,6 +274,7 @@ namespace Nilesoft
 			auto_expr where;
 			auto_expr keys;
 			auto_expr moveto;
+			auto_expr recurse;
 			auto_expr title;
 			auto_expr checked;
 			auto_expr column;

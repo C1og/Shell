@@ -122,6 +122,7 @@ namespace Nilesoft
 		constexpr auto MENU_COL = 0x0B8866C3U;
 
 		constexpr auto MENU_EXPANDED = 0xD353D90EU;
+		constexpr auto MENU_RECURSE = 0x3E09493EU;
 
 		// constants
 		constexpr auto IDENT_NO = 0x005978E2U;
@@ -353,6 +354,7 @@ namespace Nilesoft
 		constexpr auto IDENT_EXT = 0x0B887076U;
 		constexpr auto IDENT_TITLE = 0x106DAA27U;
 		constexpr auto IDENT_NAME = 0x7C9B0C46U;
+		constexpr auto IDENT_RECURSE = MENU_RECURSE;
 
 		constexpr auto IDENT_SUBMENU = 0xB03F5CA4U;
 		constexpr auto IDENT_POPUP = 0x10288299U;

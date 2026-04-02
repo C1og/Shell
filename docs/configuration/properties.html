@@ -575,6 +575,7 @@ in = "Sort By"</code></pre>
 			<li><a href="#parent">Menu</a></li>
 			<li><a href="#parent">Parent</a></li>
 			<li><a href="#position">Position</a></li>
+			<li><a href="#recurse">Recurse</a></li>
 		</ul>
 
 	</dd>
@@ -782,6 +783,19 @@ in = "Sort By"</code></pre>
 			<td>
 				<p>Move all immediate menuitems to the parent <a href="/docs/configuration/dynamic#menu">menu</a>.</p>
 				Default = <span class="syntax-keyword">false</span>
+			</td>
+		</tr>
+		<tr id="recurse">
+			<td>Recurse</td>
+			<td>st</td>
+			<td>
+				<p>For <strong>modify-items</strong>, controls whether an existing <strong>submenu target</strong> should be recursively enumerated while Nilesoft Shell builds the system menu tree.</p>
+				<p>Default = <span class="syntax-keyword">true</span></p>
+				<p>This property is evaluated <strong>before</strong> the normal modify/remove rules are applied, so it can be used to avoid loading expensive native submenus.</p>
+				<p>When set to <span class="syntax-keyword">false</span>, the submenu item itself is not hidden automatically; combine it with <a href="#visibility"><code>vis</code></a> if you only want to show the submenu under a condition.</p>
+				<strong>Syntax</strong><br/>
+				<pre><code class="lang-shell">modify(find = "Open with" recurse = false)
+modify(find = "Open with" recurse = key.control() vis = key.control())</code></pre>
 			</td>
 		</tr>
 		<tr id="column">

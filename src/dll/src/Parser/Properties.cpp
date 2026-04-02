@@ -907,6 +907,9 @@ namespace Nilesoft
 					case MENU_FIND:
 						_parse_expression(item->find);
 						break;
+					case MENU_RECURSE:
+						_parse_expression(item->recurse);
+						break;
 					case MENU_VIS:
 					case MENU_VISIBILITY:
 						_parse_expression(item->visibility);

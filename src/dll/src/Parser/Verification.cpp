@@ -332,6 +332,7 @@ namespace Nilesoft
 				case MENU_CONDITION:
 				case MENU_WHERE:
 				case MENU_FIND:
+				case MENU_RECURSE:
 				case MENU_TEXT:
 				case MENU_TITLE:
 				case MENU_KEYS:

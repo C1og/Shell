@@ -4234,21 +4234,10 @@ namespace Nilesoft
 
 		HMENU ContextMenu::MenuHandle() const { return _hMenu; }
 
-		void ContextMenu::build_main_system_menuitems(menuitem_t *menu, bool is_root)
+		bool ContextMenu::match_static_system_menuitem(NativeMenu *si, menuitem_t *menu, menuitem_t *item, size_t index, bool is_root, this_item &state)
 		{
-			PerfEvent total_perf(L"BuildMainSystemMenu", L"Total");
-			total_perf.detail.format(L"path=%s count=%d root=%d", perf_tree_path(menu).c_str(), menu ? static_cast<int>(menu->items.size()) : 0, is_root);
-
-			if(!menu || menu->items.empty())
-				return;
-
-			BuildMainSystemMenuVisitGuard visit_guard;
-			auto &visited = visit_guard.get();
-			if(!visited.insert(menu).second)
-			{
-				total_perf.detail.format(L"path=%s count=%d root=%d skipped=visited", perf_tree_path(menu).c_str(), static_cast<int>(menu->items.size()), is_root);
-				return;
-			}
+			if(!si || !item || si->has_clsid)
+				return false;
 
 			auto is_location = [=](string &location, string const &path)->auto
 			{
@@ -4267,6 +4256,116 @@ namespace Nilesoft
 
 				return path.equals(location);
 			};
+
+			string location;
+			state = {};
+			state.type = item->type;
+			state.pos = static_cast<int>(index);
+			state.checked = item->checked ? (item->radio_check ? 2 : 1) : 0;
+			state.disabled = item->disabled;
+			state.system = true;
+			state.id = item->uid();
+			state.length = item->length;
+			state.parent = menu ? menu->uid() : 0;
+
+			if(!item->is_separator())
+			{
+				state.title = item->title;
+				state.title_normalize = item->name;
+			}
+
+			_context._this = &state;
+
+			if(si->location)
+			{
+				if(_context.Eval(si->location, location, true))
+				{
+					if(!is_location(location, item->path))
+						return false;
+				}
+			}
+			else if(!is_root)
+				return false;
+
+			auto where_defined = false;
+			if(si->where)
+			{
+				if(where_defined = _context.Eval(si->where).to_bool(); !where_defined)
+					return false;
+			}
+
+			if(item->is_separator())
+				return where_defined && !si->find;
+
+			if(item->title.empty())
+				return false;
+
+			if(!si->find && !where_defined)
+				return false;
+
+			Object find = _context.Eval(si->find).move();
+			if(find.is_null() || find.length() == 0)
+				return where_defined;
+
+			string pattern = find.to_string().trim().tolower().move();
+			FindPattern find_pattern;
+			if(!find_pattern.split(pattern, L'|') && !where_defined)
+				return false;
+
+			return find_pattern.find(&item->name);
+		}
+
+		bool ContextMenu::should_recurse_system_submenu(menuitem_t *menu, menuitem_t *item, size_t index, bool is_root)
+		{
+			if(!item || !item->is_menu())
+				return false;
+
+			auto recurse = true;
+			auto previous_this = _context._this;
+
+			for(auto si : _cache->statics)
+			{
+				if(!si || !si->recurse)
+					continue;
+
+				if(!Selected.verify_types(si->fso))
+					continue;
+
+				if(si->mode)
+				{
+					auto mode = _context.parse_mode(si->mode);
+					if(Selected.Window.id > WINDOW_TASKBAR && !Selected.verify_mode(mode))
+						continue;
+				}
+
+				this_item state;
+				if(!match_static_system_menuitem(si, menu, item, index, is_root, state))
+					continue;
+
+				recurse = _context.eval_number(si->recurse, true);
+				if(si->invoke && 0 == _context.parse_invoke(si->invoke))
+					break;
+			}
+
+			_context._this = previous_this;
+			return recurse;
+		}
+
+		void ContextMenu::build_main_system_menuitems(menuitem_t *menu, bool is_root)
+		{
+			PerfEvent total_perf(L"BuildMainSystemMenu", L"Total");
+			total_perf.detail.format(L"path=%s count=%d root=%d", perf_tree_path(menu).c_str(), menu ? static_cast<int>(menu->items.size()) : 0, is_root);
+
+			if(!menu || menu->items.empty())
+				return;
+
+			BuildMainSystemMenuVisitGuard visit_guard;
+			auto &visited = visit_guard.get();
+			if(!visited.insert(menu).second)
+			{
+				total_perf.detail.format(L"path=%s count=%d root=%d skipped=visited", perf_tree_path(menu).c_str(), static_cast<int>(menu->items.size()), is_root);
+				return;
+			}
 
 			auto items = &menu->items;
 
@@ -4287,97 +4386,24 @@ namespace Nilesoft
 				if(!Selected.verify_types(si->fso))
 					continue;
 
+				if(si->mode)
+				{
+					auto mode = _context.parse_mode(si->mode);
+					if(Selected.Window.id > WINDOW_TASKBAR && !Selected.verify_mode(mode))
+						continue;
+				}
+
 				for(size_t i = 0; i < items->size(); i++)
 				{
 					PerfEvent match_perf(L"BuildMainSystemMenu", L"RuleMatch");
 					match_perf.detail.format(L"path=%s index=%d item=%s", perf_tree_path(menu).c_str(), static_cast<int>(i), perf_item_label(items->at(i)).c_str());
 					bool removed = false;
-					auto where_defined = false;
 					auto item = items->at(i);
 					try 
 					{
-						string location;
 						this_item _this;
-
-						_this.type = item->type;
-						_this.pos = static_cast<int>(i);
-						_this.checked = item->checked ? (item->radio_check ? 2 : 1) : 0;
-						_this.disabled = item->disabled;
-						_this.system = true;
-						_this.id = item->uid();
-						_this.length = item->length;
-
-						_this.parent = menu->uid();
-						//_this.level = (int)parent_level.size();
-
-						if(!item->is_separator())
-						{
-							_this.length = item->length; ;// mii->title.length<uint32_t>();
-							_this.title = item->title;
-							_this.title_normalize = item->name;
-						}
-
-						_context._this = &_this;
-
-						//if(!Selected.verify_types(si->fso))
-						//	continue;
-
-						if(si->mode)
-						{
-							auto mode = _context.parse_mode(si->mode);
-							if(Selected.Window.id > WINDOW_TASKBAR && !Selected.verify_mode(mode))
-								break;
-						}
-
-						if(si->location)
-						{
-							if(_context.Eval(si->location, location, true))
-							{
-								if(!is_location(location, item->path))
-									goto skip;
-							}
-						}
-						else if(!is_root)
+						if(!match_static_system_menuitem(si, menu, item, i, is_root, _this))
 							goto skip;
-
-						if(si->where)
-						{
-							if(where_defined = _context.Eval(si->where).to_bool(); !where_defined)
-								continue;
-						}
-
-						if(item->is_separator())
-						{
-							if(!where_defined || si->find)
-								goto skip;
-						}
-						else
-						{
-							if(item->title.empty())
-								goto skip;
-
-							if(!si->find && !where_defined)
-								goto skip;
-							else
-							{
-								Object find = _context.Eval(si->find).move();
-								if(find.is_null() || find.length() == 0)
-								{
-									if(!where_defined || (si->moveto && !is_root))
-										goto skip;
-								}
-								else
-								{
-									string pattern = find.to_string().trim().tolower().move();
-									FindPattern find_pattern;
-									if(!find_pattern.split(pattern, L'|') && !where_defined)
-										goto skip;
-
-									if(!find_pattern.find(&item->name))
-										goto skip;
-								}
-							}
-						}
 
 						if(si->visibility && _settings.modify_items.visibility)
 						{
@@ -4485,6 +4511,7 @@ namespace Nilesoft
 				PerfEvent item_perf(L"BuildSystemMenu", L"Item");
 				item_perf.detail.format(L"path=%s hMenu=0x%p index=%d", perf_tree_path(menu).c_str(), hMenu, i);
 				int found_duplicate = 0;
+				auto recurse_submenu = false;
 				string title;
 				MENUITEMINFOW mii{ sizeof(MENUITEMINFOW) };
 				mii.fMask = MenuItemInfo::FMASK;
@@ -4579,8 +4606,12 @@ namespace Nilesoft
 							//_log.info(L"MFT_BITMAP");
 						}
 
+						recurse_submenu = mii.hSubMenu ? should_recurse_system_submenu(menu, itemPtr, i, is_root) : false;
 						if(mii.hSubMenu)
-							build_system_menuitems(mii.hSubMenu, itemPtr, false);
+						{
+							if(recurse_submenu)
+								build_system_menuitems(mii.hSubMenu, itemPtr, false);
+						}
 					}
 					
 					if(found_duplicate != 2)
@@ -4603,6 +4634,8 @@ namespace Nilesoft
 						itemPtr ? perf_item_label(itemPtr).c_str() : L"<null>",
 						itemPtr ? itemPtr->type : -1,
 						mii.hSubMenu != nullptr);
+					if(mii.hSubMenu)
+						item_perf.detail += recurse_submenu ? L" recurse=1" : L" recurse=0";
 				}
 			}
 

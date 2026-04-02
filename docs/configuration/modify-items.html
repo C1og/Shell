@@ -18,6 +18,8 @@
 <pre><code class="lang-shell">modify(find = 'copy' image = #00ff00)
 modify(find = 'paste' image = #0000ff)
 remove(find = '"format"')</code></pre>
+<p>The following example keeps an expensive submenu available only when <code>Ctrl</code> is held while the context menu is opened:</p>
+<pre><code class="lang-shell">modify(find = "Open with" recurse = key.control() vis = key.control())</code></pre>
 <br>
 <h4 id="item">Item Entries</h4>
 <p><code>item</code> entries contain the instructions on how to identify existing <a href="/docs/configuration/new-items#menuitem">menuitems</a> (also referred to as <a href="#target">Target</a>), and when and what changes should be applied
